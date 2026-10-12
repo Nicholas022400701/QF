@@ -75,7 +75,7 @@ jobs:
           mkdir -p work/out work/ckpt
           bash tools/qfcrypt.sh dec "jobs/$JOB_ID.tar.gpg.b64" - | tar -xzf - -C work
           test -f work/run.sh || { echo "::error::payload has no run.sh"; exit 1; }
-          ls -la work
+          echo "payload: $(find work -type f | wc -l) files, $(du -sk work | cut -f1) KB"
 
       - name: Resume checkpoint from previous hop
         if: ${{ inputs.resume_run_id != '' }}
@@ -98,7 +98,8 @@ jobs:
           timeout --signal=TERM --kill-after=120 "$TIME_BUDGET" bash run.sh > ../run_log.txt 2>&1
           rc=$?
           cd ..
-          echo "----- last 60 log lines -----"; tail -n 60 run_log.txt
+          # The job's own output never goes to this public log; it travels encrypted in out/run_log.hop<N>.txt.
+          echo "run_log: $(wc -l < run_log.txt) lines, $(wc -c < run_log.txt) bytes"
           status=failed
           if [ -f work/ckpt/.continue ]; then status=continue; fi
           if [ "$rc" -eq 124 ]; then status=continue; fi
