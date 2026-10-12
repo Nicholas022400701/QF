@@ -1,0 +1,5 @@
+status=failed
+rc=137
+run_id=38264098846
+hop=0
+finished_at=2026-10-12T14:39:09Z
