@@ -60,6 +60,12 @@ Paired runs (2026-10-12):
   `machine_fingerprint`, and have `hops` == 1.
 - A run that was cut by the time budget (rc 124) and finished in a later hop ran on more than one machine. Its result
   carries `cross_machine: true` and must not enter a paired comparison. Size paired jobs so that one hop finishes them.
+- Instruction-set class (2026-10-12 17:59 UTC): results are bitwise reproducible only inside one instruction-set
+  class. The result file records `isa` (`avx512` when the CPU reports avx512f, else `avx2` when it reports avx2, else
+  `unknown`), the booleans avx512f / avx2 / fma under `machine`, and `isa` in every hop record. Paired units must land
+  in one isa class (avx2 or avx512) as recorded in the result file. A unit that spans isa classes is treated like a
+  unit that spans hops and is excluded from pairing (`cross_isa: true`). When the same configuration is run twice in
+  two boxes, the between-box difference is reported separately for same-isa and cross-isa pairs.
 - `run.sh` should start with a short speed probe. When the projected time does not fit the hop budget
   (`QF_TIME_BUDGET`), it writes `slow-machine` as the first line of `out/STATUS` (followed by one JSON line with the
   measured step time, the projected time and the budget) and exits with code 75 before doing real work. The runner
