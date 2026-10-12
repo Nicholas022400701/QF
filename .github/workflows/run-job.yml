@@ -1,0 +1,170 @@
+name: QF job runner
+
+# Runs one encrypted job for up to ~5.3 h, then checkpoints and hands off to a fresh run ("hop")
+# until the job reports completion or max_hops is reached. See docs/JOB_CONTRACT.md.
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        description: "Job id; jobs/<job_id>.tar.gpg.b64 must exist in the repo"
+        required: true
+        type: string
+      hop:
+        description: "Continuation hop index (0 = fresh start)"
+        required: false
+        default: "0"
+        type: string
+      max_hops:
+        description: "Maximum number of hops for this job"
+        required: false
+        default: "12"
+        type: string
+      resume_run_id:
+        description: "Run id whose checkpoint artifact to resume from (set automatically on handoff)"
+        required: false
+        default: ""
+        type: string
+      time_budget:
+        description: "Seconds run.sh may run in this hop before it is stopped and handed off"
+        required: false
+        default: "19200"
+        type: string
+      python_version:
+        description: "Python version for the runner"
+        required: false
+        default: "3.11"
+        type: string
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: qf-job-${{ inputs.job_id }}
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      JOB_ID: ${{ inputs.job_id }}
+      HOP: ${{ inputs.hop }}
+      MAX_HOPS: ${{ inputs.max_hops }}
+      RESUME_RUN_ID: ${{ inputs.resume_run_id }}
+      TIME_BUDGET: ${{ inputs.time_budget }}
+      PY_VERSION: ${{ inputs.python_version }}
+      QF_ACTION_KEY: ${{ secrets.QF_ACTION_KEY }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check prerequisites
+        run: |
+          if [ -z "$QF_ACTION_KEY" ]; then echo "::error::Repository secret QF_ACTION_KEY is not set"; exit 1; fi
+          if [ ! -f "jobs/$JOB_ID.tar.gpg.b64" ]; then echo "::error::jobs/$JOB_ID.tar.gpg.b64 not found"; exit 1; fi
+          echo "job=$JOB_ID hop=$HOP/$MAX_HOPS budget=${TIME_BUDGET}s resume_from=${RESUME_RUN_ID:-none}"
+          nproc; free -g | head -2; df -h / | tail -1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - name: Decrypt job payload
+        run: |
+          mkdir -p work/out work/ckpt
+          bash tools/qfcrypt.sh dec "jobs/$JOB_ID.tar.gpg.b64" - | tar -xzf - -C work
+          test -f work/run.sh || { echo "::error::payload has no run.sh"; exit 1; }
+          ls -la work
+
+      - name: Resume checkpoint from previous hop
+        if: ${{ inputs.resume_run_id != '' }}
+        run: |
+          gh run download "$RESUME_RUN_ID" -n "ckpt-$JOB_ID" -D /tmp/ckpt_enc
+          bash tools/qfcrypt.sh dec /tmp/ckpt_enc/ckpt.tar.gpg.b64 - | tar -xzf - -C work
+          du -sh work/ckpt
+
+      - name: Install requirements
+        run: |
+          python -m pip install --upgrade pip >/dev/null
+          if [ -f work/requirements.txt ]; then pip install -r work/requirements.txt; fi
+
+      - name: Run job (bounded by time budget)
+        id: run
+        run: |
+          set +e
+          cd work
+          export QF_JOB_ID="$JOB_ID" QF_HOP="$HOP" QF_TIME_BUDGET="$TIME_BUDGET"
+          timeout --signal=TERM --kill-after=120 "$TIME_BUDGET" bash run.sh > ../run_log.txt 2>&1
+          rc=$?
+          cd ..
+          echo "----- last 60 log lines -----"; tail -n 60 run_log.txt
+          status=failed
+          if [ -f work/ckpt/.continue ]; then status=continue; fi
+          if [ "$rc" -eq 124 ]; then status=continue; fi
+          if [ "$rc" -eq 0 ] && [ ! -f work/ckpt/.continue ]; then status=done; fi
+          echo "rc=$rc status=$status"
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+
+      - name: Package encrypted outputs
+        if: always() && steps.run.outcome != 'skipped'
+        run: |
+          mkdir -p "results/$JOB_ID"
+          cp run_log.txt "work/out/run_log.hop$HOP.txt" 2>/dev/null || true
+          tar -czf - -C work out | bash tools/qfcrypt.sh enc - "results/$JOB_ID/hop$HOP.out.tar.gpg.b64"
+          printf '%s\n' "status=${{ steps.run.outputs.status }}" "rc=${{ steps.run.outputs.rc }}" "run_id=$GITHUB_RUN_ID" "hop=$HOP" "finished_at=$(date -u +%FT%TZ)" > "results/$JOB_ID/hop$HOP.status.txt"
+          du -sh "results/$JOB_ID"
+
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.run.outcome != 'skipped'
+        with:
+          name: out-${{ inputs.job_id }}-hop${{ inputs.hop }}
+          path: results/${{ inputs.job_id }}/hop${{ inputs.hop }}.*
+          retention-days: 90
+
+      - name: Package encrypted checkpoint
+        if: steps.run.outputs.status == 'continue'
+        run: |
+          rm -f work/ckpt/.continue
+          mkdir -p /tmp/ckpt
+          tar -czf - -C work ckpt | bash tools/qfcrypt.sh enc - /tmp/ckpt/ckpt.tar.gpg.b64
+          du -sh /tmp/ckpt
+
+      - uses: actions/upload-artifact@v4
+        if: steps.run.outputs.status == 'continue'
+        with:
+          name: ckpt-${{ inputs.job_id }}
+          path: /tmp/ckpt/ckpt.tar.gpg.b64
+          retention-days: 7
+
+      - name: Commit encrypted results to repo (if under 30 MB)
+        if: always() && steps.run.outcome != 'skipped'
+        run: |
+          size_kb=$(du -sk "results/$JOB_ID" | cut -f1)
+          if [ "$size_kb" -gt 30000 ]; then echo "results/$JOB_ID is ${size_kb} KB > 30 MB; kept as artifact only"; exit 0; fi
+          git config user.name "qf-runner"
+          git config user.email "qf-runner@users.noreply.github.com"
+          git add "results/$JOB_ID"
+          git commit -m "results: $JOB_ID hop $HOP (${{ steps.run.outputs.status }})" || exit 0
+          for i in 1 2 3 4 5; do
+            git pull --rebase origin "$GITHUB_REF_NAME" && git push origin HEAD:"$GITHUB_REF_NAME" && exit 0
+            sleep $((i * 10))
+          done
+          echo "::warning::could not push results; the artifact is still available"
+
+      - name: Hand off to next hop
+        if: steps.run.outputs.status == 'continue'
+        run: |
+          next=$((HOP + 1))
+          if [ "$next" -ge "$MAX_HOPS" ]; then echo "::warning::max_hops=$MAX_HOPS reached; not continuing"; exit 0; fi
+          gh workflow run run-job.yml --ref "$GITHUB_REF_NAME" \
+            -f job_id="$JOB_ID" -f hop="$next" -f max_hops="$MAX_HOPS" \
+            -f resume_run_id="$GITHUB_RUN_ID" -f time_budget="$TIME_BUDGET" -f python_version="$PY_VERSION"
+          echo "dispatched hop $next (it queues behind this run via the concurrency group)"
+
+      - name: Report
+        if: always() && steps.run.outcome != 'skipped'
+        run: |
+          echo "### QF job $JOB_ID — hop $HOP: ${{ steps.run.outputs.status }} (rc ${{ steps.run.outputs.rc }})" >> "$GITHUB_STEP_SUMMARY"
+          [ "${{ steps.run.outputs.status }}" != "failed" ] || exit 1

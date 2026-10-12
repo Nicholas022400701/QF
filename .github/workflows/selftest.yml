@@ -1,0 +1,52 @@
+name: QF selftest (hop chain + crypto)
+
+# Verifies, without any secret, that (1) gpg round-trip works on the runner and
+# (2) a run can dispatch its own successor with GITHUB_TOKEN (self-continuation).
+on:
+  workflow_dispatch:
+    inputs:
+      hop:
+        default: "0"
+        type: string
+      max_hops:
+        default: "3"
+        type: string
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: qf-selftest
+  cancel-in-progress: false
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Runner facts
+        run: |
+          echo "hop ${{ inputs.hop }} of ${{ inputs.max_hops }}"
+          uname -a; nproc; free -g | head -2; df -h / | tail -1; python3 --version; gpg --version | head -1
+      - name: Crypto round trip with a throwaway key
+        run: |
+          export QF_ACTION_KEY=throwaway-selftest-key
+          head -c 100000 /dev/urandom > /tmp/plain.bin
+          bash tools/qfcrypt.sh enc /tmp/plain.bin /tmp/enc.b64
+          bash tools/qfcrypt.sh dec /tmp/enc.b64 /tmp/back.bin
+          cmp /tmp/plain.bin /tmp/back.bin && echo "round trip OK ($(wc -c < /tmp/enc.b64) bytes armoured)"
+      - name: Simulated work
+        run: sleep 20
+      - name: Chain to next hop
+        run: |
+          next=$(( ${{ inputs.hop }} + 1 ))
+          if [ "$next" -lt "${{ inputs.max_hops }}" ]; then
+            gh workflow run selftest.yml --ref "$GITHUB_REF_NAME" -f hop="$next" -f max_hops="${{ inputs.max_hops }}"
+            echo "dispatched hop $next"
+          else
+            echo "chain complete at hop ${{ inputs.hop }}"
+          fi
