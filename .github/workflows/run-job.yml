@@ -103,6 +103,7 @@ jobs:
           status=failed
           if [ -f work/ckpt/.continue ]; then status=continue; fi
           if [ "$rc" -eq 124 ]; then status=continue; fi
+          if [ "$rc" -eq 75 ]; then status=requeue; fi   # job asked to be re-dispatched on another machine; no hand-off
           if [ "$rc" -eq 0 ] && [ ! -f work/ckpt/.continue ]; then status=done; fi
           echo "rc=$rc status=$status"
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
@@ -169,3 +170,4 @@ jobs:
         run: |
           echo "### QF job $JOB_ID — hop $HOP: ${{ steps.run.outputs.status }} (rc ${{ steps.run.outputs.rc }})" >> "$GITHUB_STEP_SUMMARY"
           [ "${{ steps.run.outputs.status }}" != "failed" ] || exit 1
+          [ "${{ steps.run.outputs.status }}" != "requeue" ] || echo "::warning::job $JOB_ID asked to be re-dispatched (rc 75)"
