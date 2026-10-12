@@ -49,3 +49,19 @@ Log policy (2026-10-12):
 - Keep every name inside the payload (directories, files, job ids) neutral and free of project-specific words.
   Earlier versions of the workflow listed the unpacked payload in the public log; the listing is gone, but names
   should not depend on that.
+
+Paired runs (2026-10-12):
+
+- When several configurations are compared pairwise under one seed, all of them must run inside the same job and
+  the same hop: the unit of work is "one seed x all configurations", not "one configuration x many seeds". Results
+  written with `qf_runtime.writeResult` record `run_id`, `hostname`, `cpu_model`, the BLAS library, library versions,
+  the backend platform version, thread environment variables and a `machine_fingerprint` (CPU model + binaries), so
+  this can be checked from the result files alone: paired results must share `run_id` and `hostname`, have equal
+  `machine_fingerprint`, and have `hops` == 1.
+- A run that was cut by the time budget (rc 124) and finished in a later hop ran on more than one machine. Its result
+  carries `cross_machine: true` and must not enter a paired comparison. Size paired jobs so that one hop finishes them.
+- `run.sh` should start with a short speed probe. When the projected time does not fit the hop budget
+  (`QF_TIME_BUDGET`), it writes `slow-machine` as the first line of `out/STATUS` (followed by one JSON line with the
+  measured step time, the projected time and the budget) and exits with code 75 before doing real work. The runner
+  reports the hop as failed and packages `out/`; the dispatcher re-dispatches under a new job id, which lands on
+  another machine. The status string `slow-machine` and exit code 75 are shared by every tool that reads results.
