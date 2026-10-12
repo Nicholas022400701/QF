@@ -65,3 +65,13 @@ Paired runs (2026-10-12):
   measured step time, the projected time and the budget) and exits with code 75 before doing real work. The runner
   reports the hop as failed and packages `out/`; the dispatcher re-dispatches under a new job id, which lands on
   another machine. The status string `slow-machine` and exit code 75 are shared by every tool that reads results.
+
+Job ids and public names (2026-10-12):
+
+- Job ids carry no meaning. A regular job id is `j` followed by the UTC time of dispatch as `YYMMDDhhmm` (10 digits),
+  optionally followed by 2 or 4 more digits when several jobs are created at once (for example `j2610121640`,
+  `j261012164001`). An infrastructure self-test uses `t` followed by the same digits (for example `t2610121750`).
+  Older self-tests used plain words as ids; those are deprecated, and the packaging tool only accepts them with a
+  warning. Everything else that appears on the public side derives from the id: payload files `jobs/<id>.tar.gpg.b64`,
+  result files `results/<id>/...`, commit messages `jobs: add <id> [<id> ...]` and `results: <id> hop <n> (<status>)`,
+  and the workflow inputs. No other words belong in file names or commit messages.
