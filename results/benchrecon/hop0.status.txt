@@ -1,0 +1,5 @@
+status=done
+rc=0
+run_id=38270528488
+hop=0
+finished_at=2026-10-12T15:30:21Z
