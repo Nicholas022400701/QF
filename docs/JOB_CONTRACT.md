@@ -38,3 +38,14 @@ Notes from runner tests (2026-10-12):
   successful hop. Checkpoints must be written atomically (temporary file, fsync, rename) so that a kill in the
   middle of a write leaves the previous checkpoint intact, and SIGTERM must be handled (set a flag, save at the
   next safe point, exit) so that the work since the last periodic checkpoint is not lost.
+
+Log policy (2026-10-12):
+
+- Nothing that `run.sh` prints appears in the public Actions log. The workflow records only counts: the number of
+  files and kilobytes of the unpacked payload, and the number of lines and bytes of the run log. The complete
+  stdout/stderr of `run.sh` is saved as `out/run_log.hop<n>.txt` inside the encrypted output of that hop.
+- Debugging therefore means: fetch and decrypt the hop output (status file + `hop<n>.out.tar.gpg.b64`, or the
+  `out-<job_id>-hop<n>` artifact), then read `out/run_log.hop<n>.txt`. A failed hop still packages its `out/`.
+- Keep every name inside the payload (directories, files, job ids) neutral and free of project-specific words.
+  Earlier versions of the workflow listed the unpacked payload in the public log; the listing is gone, but names
+  should not depend on that.
