@@ -123,7 +123,7 @@ jobs:
         with:
           name: out-${{ inputs.job_id }}-hop${{ inputs.hop }}
           path: results/${{ inputs.job_id }}/hop${{ inputs.hop }}.*
-          retention-days: 90
+          retention-days: 7
 
       - name: Package encrypted checkpoint
         if: steps.run.outputs.status == 'continue'
