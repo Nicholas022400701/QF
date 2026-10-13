@@ -1,0 +1,142 @@
+name: QF artifact ingest
+
+# Copies one workflow-run artifact (out-<job_id>-hop<hop>: hop<hop>.out.tar.gpg.b64 + hop<hop>.status.txt) into
+# results/<job_id>/ of this repository as 50 MB volumes, for runs whose encrypted output exceeded the 30 MB
+# in-run commit limit of run-job.yml. The zip digest is verified before anything is written. Optionally deletes
+# the artifact after the volumes have been pushed.
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        description: "Job id (results/<job_id>/ is the target directory)"
+        required: true
+        type: string
+      run_id:
+        description: "Workflow run id that produced the artifact (recorded in the manifest)"
+        required: true
+        type: string
+      artifact_id:
+        description: "Artifact id to download"
+        required: true
+        type: string
+      expected_digest:
+        description: "Expected sha256 (hex, 64 chars) of the artifact zip; mismatch fails the run before any write"
+        required: true
+        type: string
+      hop:
+        description: "Hop number of the artifact (default 0)"
+        required: false
+        default: "0"
+        type: string
+      delete_after:
+        description: "Delete the artifact after the volumes were pushed successfully"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: qf-ingest-${{ inputs.job_id }}
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      JOB_ID: ${{ inputs.job_id }}
+      RUN_ID: ${{ inputs.run_id }}
+      ARTIFACT_ID: ${{ inputs.artifact_id }}
+      EXPECTED_DIGEST: ${{ inputs.expected_digest }}
+      HOP: ${{ inputs.hop }}
+      DELETE_AFTER: ${{ inputs.delete_after }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check inputs
+        run: |
+          [[ "$EXPECTED_DIGEST" =~ ^[0-9a-f]{64}$ ]] || { echo "expected_digest must be 64 hex chars"; exit 1; }
+          [[ "$JOB_ID" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "bad job_id"; exit 1; }
+          [[ "$HOP" =~ ^[0-9]+$ ]] || { echo "bad hop"; exit 1; }
+          if ls "results/$JOB_ID"/hop"$HOP".out.tar.gpg.b64* >/dev/null 2>&1; then echo "results/$JOB_ID already holds hop$HOP output; refusing to overwrite"; exit 1; fi
+
+      - name: Download artifact zip
+        run: |
+          mkdir -p /tmp/art
+          gh api -H "Accept: application/vnd.github+json" "/repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > /tmp/art/artifact.zip
+          ls -l /tmp/art/artifact.zip
+
+      - name: Verify digest (fail before any write)
+        id: digest
+        run: |
+          got=$(sha256sum /tmp/art/artifact.zip | cut -c1-64)
+          echo "zip sha256 $got"
+          [ "$got" = "$EXPECTED_DIGEST" ] || { echo "digest mismatch: expected $EXPECTED_DIGEST got $got"; exit 1; }
+          echo "zip_sha256=$got" >> "$GITHUB_OUTPUT"
+          echo "zip_bytes=$(stat -c %s /tmp/art/artifact.zip)" >> "$GITHUB_OUTPUT"
+
+      - name: Unpack and split into 50 MB volumes
+        run: |
+          set -e
+          unzip -q /tmp/art/artifact.zip -d /tmp/art/content
+          src="/tmp/art/content/hop$HOP.out.tar.gpg.b64"; st="/tmp/art/content/hop$HOP.status.txt"
+          [ -f "$src" ] || { echo "artifact has no hop$HOP.out.tar.gpg.b64"; exit 1; }
+          [ -f "$st" ] || { echo "artifact has no hop$HOP.status.txt"; exit 1; }
+          dest="results/$JOB_ID"; mkdir -p "$dest"
+          cp "$st" "$dest/hop$HOP.status.txt"
+          split -b 50m -d -a 2 "$src" "$dest/hop$HOP.out.tar.gpg.b64.part"
+          whole=$(sha256sum "$src" | cut -c1-64); bytes=$(stat -c %s "$src")
+          nparts=$(ls "$dest"/hop"$HOP".out.tar.gpg.b64.part?? | wc -l)
+          m="$dest/hop$HOP.artifact.MANIFEST.txt"
+          {
+            echo "job_id=$JOB_ID"
+            echo "hop=$HOP"
+            echo "run_id=$RUN_ID"
+            echo "artifact_id=$ARTIFACT_ID"
+            echo "artifact_zip_sha256=${{ steps.digest.outputs.zip_sha256 }}"
+            echo "artifact_zip_bytes=${{ steps.digest.outputs.zip_bytes }}"
+            echo "file=hop$HOP.out.tar.gpg.b64"
+            echo "file_sha256=$whole"
+            echo "file_bytes=$bytes"
+            echo "volumes=$nparts"
+            echo "volume_size=50m"
+            echo "reassemble=cat hop$HOP.out.tar.gpg.b64.part?? > hop$HOP.out.tar.gpg.b64 && sha256sum -c hop$HOP.out.tar.gpg.b64.sha256"
+            echo "ingested_by=ingest-artifact.yml run $GITHUB_RUN_ID"
+            echo "ingested_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "== volumes (sha256  bytes  name)"
+            for p in "$dest"/hop"$HOP".out.tar.gpg.b64.part??; do echo "$(sha256sum "$p" | cut -c1-64)  $(stat -c %s "$p")  $(basename "$p")"; done
+          } > "$m"
+          echo "$whole  hop$HOP.out.tar.gpg.b64" > "$dest/hop$HOP.out.tar.gpg.b64.sha256"
+          ( cd "$dest" && sha256sum hop"$HOP".out.tar.gpg.b64.part?? > "hop$HOP.out.tar.gpg.b64.parts.sha256" )
+          cat "$m"
+          du -sh "$dest"
+
+      - name: Commit volumes to repo
+        id: commit
+        run: |
+          git config user.name "qf-runner"
+          git config user.email "qf-runner@users.noreply.github.com"
+          git add "results/$JOB_ID"
+          git commit -m "results: $JOB_ID hop $HOP (artifact $ARTIFACT_ID ingest, 50m volumes)"
+          for i in 1 2 3 4 5; do
+            if git pull --rebase origin "$GITHUB_REF_NAME" && git push origin HEAD:"$GITHUB_REF_NAME"; then
+              echo "pushed=true" >> "$GITHUB_OUTPUT"; echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"; exit 0
+            fi
+            sleep $((i * 10))
+          done
+          echo "pushed=false" >> "$GITHUB_OUTPUT"; echo "could not push volumes"; exit 1
+
+      - name: Delete artifact (only if requested and pushed)
+        if: ${{ inputs.delete_after && steps.commit.outputs.pushed == 'true' }}
+        run: |
+          gh api -X DELETE "/repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID"
+          echo "artifact $ARTIFACT_ID deleted"
+
+      - name: Report
+        if: always()
+        run: |
+          echo "### ingest $JOB_ID hop $HOP: artifact $ARTIFACT_ID, pushed=${{ steps.commit.outputs.pushed }}, commit=${{ steps.commit.outputs.commit }}, delete_after=$DELETE_AFTER" >> "$GITHUB_STEP_SUMMARY"
