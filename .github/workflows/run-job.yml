@@ -114,7 +114,7 @@ jobs:
         run: |
           mkdir -p "results/$JOB_ID"
           cp run_log.txt "work/out/run_log.hop$HOP.txt" 2>/dev/null || true
-          tar -czf - -C work out | bash tools/qfcrypt.sh enc - "results/$JOB_ID/hop$HOP.out.tar.gpg.b64"
+          tar -czf - --exclude='out/tmp' -C work out | bash tools/qfcrypt.sh enc - "results/$JOB_ID/hop$HOP.out.tar.gpg.b64"
           printf '%s\n' "status=${{ steps.run.outputs.status }}" "rc=${{ steps.run.outputs.rc }}" "run_id=$GITHUB_RUN_ID" "hop=$HOP" "finished_at=$(date -u +%FT%TZ)" > "results/$JOB_ID/hop$HOP.status.txt"
           du -sh "results/$JOB_ID"
 
