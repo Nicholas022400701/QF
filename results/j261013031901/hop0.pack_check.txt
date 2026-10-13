@@ -1,0 +1,11 @@
+pack_check=pass
+archive_kb=6620
+archive_entries=57
+runs_checked=16
+lyap64_on=16
+lyap64_off=0
+ckptparams_required=yes
+ckptparams_ok=16
+lyaplocal64_in_archive=0
+out_tmp_left_on_runner=16
+problems=0
