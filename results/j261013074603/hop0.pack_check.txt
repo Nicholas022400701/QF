@@ -1,0 +1,17 @@
+pack_check=pass
+rule=lyap64-branch-v3(T5lead-0411Z)
+archive_kb=6443
+archive_entries=72
+runs_checked=21
+lyap64_on=21
+lyap64_off=0
+lyap64_failed=0
+lyap64_expect_fail=off
+ckptparams_required_for_on=yes
+ckptparams_ok_on=21
+ckptparams_present_off=0
+lyap64_off_with_lyapckpts64=0
+per_arm_on_off_failed=gru:3/0/0;l0_shell:3/0/0;l0k_damp085:3/0/0;l0n_binned:3/0/0;l0n_binned_x0.1:3/0/0;l0n_binned_x10:3/0/0;lee_edge:3/0/0
+lyaplocal64_in_archive=0
+out_tmp_left_on_runner=21
+problems=0
