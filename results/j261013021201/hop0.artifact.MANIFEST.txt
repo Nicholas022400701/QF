@@ -1,0 +1,16 @@
+job_id=j261013021201
+hop=0
+run_id=38335836221
+artifact_id=11788232438
+artifact_zip_sha256=78932c844006dc4eefc48d869640a1b05e93f48e7ea47bb0c5c10e914bb9e309
+artifact_zip_bytes=36058101
+file=hop0.out.tar.gpg.b64
+file_sha256=8c2d87b7d9ebe009a70b0aacb4a89e4993166486e73888d191824e4e83890e63
+file_bytes=47874448
+volumes=1
+volume_size=50m
+reassemble=cat hop0.out.tar.gpg.b64.part?? > hop0.out.tar.gpg.b64 && sha256sum -c hop0.out.tar.gpg.b64.sha256
+ingested_by=ingest-artifact.yml run 38347739475
+ingested_at=2026-10-13T04:43:07Z
+== volumes (sha256  bytes  name)
+8c2d87b7d9ebe009a70b0aacb4a89e4993166486e73888d191824e4e83890e63  47874448  hop0.out.tar.gpg.b64.part00
