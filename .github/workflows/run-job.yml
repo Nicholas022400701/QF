@@ -133,11 +133,15 @@ jobs:
               env = dict(l.strip().split("=", 1) for l in open("work/job.env") if "=" in l)
           drop = env.get("DROP_SIDECARS", "0") == "1"
           want_ckpt = (not drop) and ("_ckptparams.npz" in env.get("SIDECARS", "_lyaplocal64.npz,_ckptparams.npz,_lyaplocal.npz"))
-          # rule (T5 lead 03:42Z, Leader 03:41Z): branch on lyap64 on/off per run.
-          #   on  (lyap64Status.ok is True): lyapCkpts64 non-empty AND _ckptparams.npz present (in out/ and in archive)
-          #   off (otherwise):               lyapCkpts64 empty/absent; _ckptparams.npz not required (presence is not an error)
+          expect_fail = env.get("LYAP64_EXPECT_FAIL", "0") == "1"
+          # rule 3 (T5 lead 04:11Z, after T5-B 04:09Z finding; rule 2 = T5 lead 03:42Z / Leader 03:41Z): three states per run.
+          #   on     (lyap64Status.ok is True):      lyapCkpts64 non-empty AND _ckptparams.npz present (in out/ and in archive) when job.env keeps it
+          #   off    (lyap64Status ABSENT = --noLyap64): lyapCkpts64 empty/absent; _ckptparams.npz not required (presence only counted)
+          #   failed (lyap64Status present, ok not True): the lyap64 subprocess failed -> listed as lyap64_failed and a problem,
+          #          unless job.env LYAP64_EXPECT_FAIL=1 (then counted and listed as expected, not fatal)
           #   all runs: run json in archive; archive has no _lyaplocal64.npz
-          problems, checked, lyap_on, lyap_off, ckpt_ok, ckpt_present_off, off_nonempty = [], 0, 0, 0, 0, 0, 0
+          problems, expected, checked = [], [], 0
+          lyap_on, lyap_off, lyap_failed, ckpt_ok, ckpt_present_off, off_nonempty = 0, 0, 0, 0, 0, 0
           per_arm = {}
           for p in sorted(glob.glob(f"{out}/*.json")):
               try:
@@ -147,13 +151,15 @@ jobs:
               if not (isinstance(d, dict) and "qf" in d and "args" in d):
                   continue
               name = os.path.basename(p)[:-5]; checked += 1
-              arm = name.split(".")[0].rsplit("_s", 1)[0] if "." in name else name.rsplit("_s", 1)[0]
-              a = per_arm.setdefault(arm, [0, 0])
-              st = d.get("lyap64Status") or {}
+              arm = (d.get("grid") or {}).get("arm") or (d["qf"].get("grid") or {}).get("arm")   # arm from the run record (04:11Z), not from the file name
+              if not arm:
+                  arm = name.split(".")[0].rsplit("_s", 1)[0] if "." in name else name.rsplit("_s", 1)[0]
+              a = per_arm.setdefault(str(arm), [0, 0, 0])
+              st = d.get("lyap64Status")
               cp = d.get("ckptParamsFile")
               cp_in_out = bool(cp) and os.path.exists(f"{out}/{cp}")
               cp_in_tar = bool(cp) and (f"out/{cp}" in names)
-              if st.get("ok") is True:
+              if isinstance(st, dict) and st.get("ok") is True:
                   lyap_on += 1; a[0] += 1
                   if not d.get("lyapCkpts64"):
                       problems.append(f"{name}: lyap64 on but lyapCkpts64 empty")
@@ -164,13 +170,17 @@ jobs:
                           problems.append(f"{name}: lyap64 on but {cp} not in archive listing")
                       else:
                           ckpt_ok += 1
-              else:
+              elif st is None:
                   lyap_off += 1; a[1] += 1
                   if d.get("lyapCkpts64"):
                       off_nonempty += 1
                       problems.append(f"{name}: lyap64 off but lyapCkpts64 non-empty ({len(d.get('lyapCkpts64'))} entries)")
                   if cp_in_out or cp_in_tar:
                       ckpt_present_off += 1
+              else:
+                  lyap_failed += 1; a[2] += 1
+                  err = str((st or {}).get("error", st))[:160] if isinstance(st, dict) else str(st)[:160]
+                  (expected if expect_fail else problems).append(f"{name}: lyap64 failed ({err})")
               if f"out/{name}.json" not in names:
                   problems.append(f"{name}: run json not in archive listing")
           lyap_in_archive = sum(1 for n in names if n.endswith("_lyaplocal64.npz"))
@@ -178,17 +188,18 @@ jobs:
               problems.append(f"{lyap_in_archive} _lyaplocal64.npz entries in archive")
           tmp_left = len(glob.glob(f"{out}/tmp/*"))
           kb = os.path.getsize(f"results/{job}/hop{hop}.out.tar.gpg.b64") // 1024
-          lines = [f"pack_check={'pass' if not problems else 'fail'}", "rule=lyap64-branch(T5lead-0342Z)", f"archive_kb={kb}", f"archive_entries={len(names)}",
-                   f"runs_checked={checked}", f"lyap64_on={lyap_on}", f"lyap64_off={lyap_off}",
+          lines = [f"pack_check={'pass' if not problems else 'fail'}", "rule=lyap64-branch-v3(T5lead-0411Z)", f"archive_kb={kb}", f"archive_entries={len(names)}",
+                   f"runs_checked={checked}", f"lyap64_on={lyap_on}", f"lyap64_off={lyap_off}", f"lyap64_failed={lyap_failed}",
+                   f"lyap64_expect_fail={'on' if expect_fail else 'off'}",
                    f"ckptparams_required_for_on={'yes' if want_ckpt else 'no'}", f"ckptparams_ok_on={ckpt_ok}",
                    f"ckptparams_present_off={ckpt_present_off}", f"lyap64_off_with_lyapckpts64={off_nonempty}",
-                   f"per_arm_on_off=" + ";".join(f"{k}:{v[0]}/{v[1]}" for k, v in sorted(per_arm.items())),
+                   f"per_arm_on_off_failed=" + ";".join(f"{k}:{v[0]}/{v[1]}/{v[2]}" for k, v in sorted(per_arm.items())),
                    f"lyaplocal64_in_archive={lyap_in_archive}", f"out_tmp_left_on_runner={tmp_left}", f"problems={len(problems)}"]
           with open(f"results/{job}/hop{hop}.pack_check.txt", "w") as f:
-              f.write("\n".join(lines + [f"problem: {x}" for x in problems]) + "\n")
+              f.write("\n".join(lines + [f"expected_fail: {x}" for x in expected] + [f"problem: {x}" for x in problems]) + "\n")
           with open(f"results/{job}/hop{hop}.status.txt", "a") as f:
               f.write("\n".join(lines) + "\n")
-          print("\n".join(lines + [f"problem: {x}" for x in problems]))
+          print("\n".join(lines + [f"expected_fail: {x}" for x in expected] + [f"problem: {x}" for x in problems]))
           sys.exit(1 if problems else 0)
           PY
 
