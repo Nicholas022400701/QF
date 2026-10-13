@@ -114,9 +114,67 @@ jobs:
         run: |
           mkdir -p "results/$JOB_ID"
           cp run_log.txt "work/out/run_log.hop$HOP.txt" 2>/dev/null || true
-          tar -czf - -C work out | bash tools/qfcrypt.sh enc - "results/$JOB_ID/hop$HOP.out.tar.gpg.b64"
+          tar -czf "/tmp/out.hop$HOP.tgz" --exclude='out/tmp' -C work out
+          tar -tzf "/tmp/out.hop$HOP.tgz" > "/tmp/out.hop$HOP.list"
+          bash tools/qfcrypt.sh enc "/tmp/out.hop$HOP.tgz" "results/$JOB_ID/hop$HOP.out.tar.gpg.b64"
           printf '%s\n' "status=${{ steps.run.outputs.status }}" "rc=${{ steps.run.outputs.rc }}" "run_id=$GITHUB_RUN_ID" "hop=$HOP" "finished_at=$(date -u +%FT%TZ)" > "results/$JOB_ID/hop$HOP.status.txt"
           du -sh "results/$JOB_ID"
+
+      - name: Verify archive contents (fail instead of shipping a bad archive)
+        if: always() && steps.run.outcome != 'skipped'
+        run: |
+          python - <<'PY'
+          import glob, json, os, sys
+          job, hop = os.environ["JOB_ID"], os.environ["HOP"]
+          out = "work/out"
+          names = set(open(f"/tmp/out.hop{hop}.list").read().split())
+          env = {}
+          if os.path.exists("work/job.env"):
+              env = dict(l.strip().split("=", 1) for l in open("work/job.env") if "=" in l)
+          drop = env.get("DROP_SIDECARS", "0") == "1"
+          want_ckpt = (not drop) and ("_ckptparams.npz" in env.get("SIDECARS", "_lyaplocal64.npz,_ckptparams.npz,_lyaplocal.npz"))
+          problems, checked, lyap_on, lyap_off, ckpt_ok = [], 0, 0, 0, 0
+          for p in sorted(glob.glob(f"{out}/*.json")):
+              try:
+                  d = json.load(open(p))
+              except Exception as e:
+                  problems.append(f"{os.path.basename(p)}: unreadable ({e})"); continue
+              if not (isinstance(d, dict) and "qf" in d and "args" in d):
+                  continue
+              name = os.path.basename(p)[:-5]; checked += 1
+              st = d.get("lyap64Status") or {}
+              if st.get("ok") is True:
+                  lyap_on += 1
+                  if not d.get("lyapCkpts64"):
+                      problems.append(f"{name}: lyap64Status.ok but lyapCkpts64 empty")
+              else:
+                  lyap_off += 1
+              if want_ckpt:
+                  cp = d.get("ckptParamsFile")
+                  if not cp or not os.path.exists(f"{out}/{cp}"):
+                      problems.append(f"{name}: ckptParamsFile missing in out/ ({cp})")
+                  elif f"out/{cp}" not in names:
+                      problems.append(f"{name}: {cp} not in archive listing")
+                  else:
+                      ckpt_ok += 1
+              if f"out/{name}.json" not in names:
+                  problems.append(f"{name}: run json not in archive listing")
+          lyap_in_archive = sum(1 for n in names if n.endswith("_lyaplocal64.npz"))
+          if lyap_in_archive:
+              problems.append(f"{lyap_in_archive} _lyaplocal64.npz entries in archive")
+          tmp_left = len(glob.glob(f"{out}/tmp/*"))
+          kb = os.path.getsize(f"results/{job}/hop{hop}.out.tar.gpg.b64") // 1024
+          lines = [f"pack_check={'pass' if not problems else 'fail'}", f"archive_kb={kb}", f"archive_entries={len(names)}",
+                   f"runs_checked={checked}", f"lyap64_on={lyap_on}", f"lyap64_off={lyap_off}",
+                   f"ckptparams_required={'yes' if want_ckpt else 'no'}", f"ckptparams_ok={ckpt_ok}",
+                   f"lyaplocal64_in_archive={lyap_in_archive}", f"out_tmp_left_on_runner={tmp_left}", f"problems={len(problems)}"]
+          with open(f"results/{job}/hop{hop}.pack_check.txt", "w") as f:
+              f.write("\n".join(lines + [f"problem: {x}" for x in problems]) + "\n")
+          with open(f"results/{job}/hop{hop}.status.txt", "a") as f:
+              f.write("\n".join(lines) + "\n")
+          print("\n".join(lines + [f"problem: {x}" for x in problems]))
+          sys.exit(1 if problems else 0)
+          PY
 
       - uses: actions/upload-artifact@v4
         if: always() && steps.run.outcome != 'skipped'
